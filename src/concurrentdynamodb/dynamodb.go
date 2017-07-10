@@ -24,6 +24,11 @@ type dynamodbInfo struct {
 	Region    string
 }
 
+type ConcurrentTesting struct {
+	Tid int `json:"tid"`
+	Rid int `json:"Rid"`
+}
+
 func Connect(info dynamodbInfo) *ConcurrentDynamoDB {
 	creds := credentials.NewStaticCredentials(info.AccessKey, info.SecretKey, "")
 	conf := aws.Config{
@@ -111,7 +116,7 @@ func (c *ConcurrentDynamoDB) ConcurrentGetItem(input []*dynamodb.GetItemInput) (
 		close(ddbErrChan)
 	}()
 
-	mergeResultChan, mergeErrChan := DDB.mergeConcurrentResp(ddbResultChan, ddbErrChan, taskDoneChan)
+	mergeResultChan, mergeErrChan := DynamodbInst.mergeConcurrentResp(ddbResultChan, ddbErrChan, taskDoneChan)
 
 	select {
 	case mergeResult := <-mergeResultChan:
@@ -175,5 +180,83 @@ func (c *ConcurrentDynamoDB) ConcurrentBatchGetItem(input []*dynamodb.BatchGetIt
 	}
 
 	return output, err
+}
+
+// TODO: Make parameter/resp generics
+func PrepareTestData(c *ConcurrentTesting, limit int64) (testData []ConcurrentTesting) {
+	param := &dynamodb.ScanInput{
+		TableName:            aws.String("concurrentTesting"),
+		ProjectionExpression: aws.String("tid, rid"),
+		Limit:                aws.Int64(limit),
+	}
+
+	resp, _ := c.Scan(param)
+	for _, item := range resp.Items {
+		data := ConcurrentTesting{}
+		dynamodbattribute.ConvertFromMap(item, &data)
+		testData = append(testData, data)
+	}
+	return
+}
+
+// TODO: Make parameter generics
+func PrepareGetItemInput(testConcurrentTestings []ConcurrentTesting) (testData []*dynamodb.GetItemInput) {
+	for _, item := range testConcurrentTestings {
+		ddbData := &dynamodb.GetItemInput{
+			Key: map[string]*dynamodb.AttributeValue{
+				"tid": {
+					N: aws.String(strconv.Itoa(item.Pid)),
+				},
+				"rid": {
+					N: aws.String(strconv.Itoa(item.Cid)),
+				},
+			},
+			TableName:              aws.String("concurrentTesting"),
+			ReturnConsumedCapacity: aws.String("INDEXES"),
+		}
+		testData = append(testData, ddbData)
+	}
+	return
+}
+
+// TODO: Make parameter generics
+func PrepareBatchGetItemInput(testConcurrentTestings []ConcurrentTesting) (testData []*dynamodb.BatchGetItemInput) {
+	var chunkSize = 100
+
+	var ddbAttributeValueData []map[string]*dynamodb.AttributeValue
+	for _, item := range testConcurrentTestings {
+		data := map[string]*dynamodb.AttributeValue{
+			"tid": {
+				N: aws.String(strconv.Itoa(item.Pid)),
+			},
+			"rid": {
+				N: aws.String(strconv.Itoa(item.Cid)),
+			},
+		}
+		ddbAttributeValueData = append(ddbAttributeValueData, data)
+	}
+
+	var chunkData [][]map[string]*dynamodb.AttributeValue
+	for start := 0; start < len(ddbAttributeValueData); start = start + chunkSize {
+		end := start + chunkSize
+		if end > len(ddbAttributeValueData) {
+			end = len(ddbAttributeValueData)
+		}
+		chunkData = append(chunkData, ddbAttributeValueData[start:end])
+	}
+
+	for _, chunk := range chunkData {
+		ddbData := &dynamodb.BatchGetItemInput{
+			RequestItems: map[string]*dynamodb.KeysAndAttributes{
+				"concurrentTesting": {
+					Keys: chunk,
+				},
+			},
+			ReturnConsumedCapacity: aws.String("INDEXES"),
+		}
+		testData = append(testData, ddbData)
+	}
+
+	return
 }
 
